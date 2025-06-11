@@ -1,8 +1,3 @@
-"""
-交互式反馈收集器 MCP 服务器
-AI调用时会汇报工作内容，用户可以提供文本反馈和/或图片反馈
-"""
-
 import io
 import base64
 import tkinter as tk
@@ -42,7 +37,7 @@ class FeedbackDialog:
         def run_dialog():
             self.root = tk.Tk()
             self.root.title("🎯 工作完成汇报与反馈收集")
-            self.root.geometry("700x800")
+
             self.root.resizable(True, True)
             self.root.configure(bg="#f5f5f5")
             
@@ -52,8 +47,22 @@ class FeedbackDialog:
             except:
                 pass
             
-            # 居中显示窗口
-            self.root.eval('tk::PlaceWindow . center')
+            # 居中显示窗口，但向上偏移一些避免被状态栏挡住
+            self.root.update_idletasks()  # 确保窗口尺寸已计算
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            window_width = 700
+            window_height = 900
+
+            # 计算居中位置，但向上偏移50像素
+            x = (screen_width - window_width) // 2
+            y = (screen_height - window_height) // 2 - 50
+
+            # 确保窗口不会超出屏幕顶部
+            if y < 0:
+                y = 0
+
+            self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
             
             # 创建界面
             self.create_widgets()
@@ -311,26 +320,177 @@ class FeedbackDialog:
     def paste_from_clipboard(self):
         """从剪贴板粘贴图片"""
         try:
-            from PIL import ImageGrab
-            img = ImageGrab.grabclipboard()
-            
-            if img:
+            from PIL import ImageGrab, Image
+
+            # 方法1: 使用PIL ImageGrab
+            clipboard_content = ImageGrab.grabclipboard()
+            img = None
+
+            print(f"调试: 剪贴板内容类型: {type(clipboard_content)}")
+
+            if clipboard_content is not None:
+                # 如果是列表，检查是否包含文件路径
+                if isinstance(clipboard_content, list):
+                    print(f"调试: 剪贴板包含列表，长度: {len(clipboard_content)}")
+                    if len(clipboard_content) > 0:
+                        first_item = clipboard_content[0]
+                        print(f"调试: 列表第一个元素类型: {type(first_item)}")
+                        print(f"调试: 列表第一个元素内容: {first_item}")
+
+                        # 如果是字符串，可能是文件路径
+                        if isinstance(first_item, str):
+                            # 检查是否是图片文件路径
+                            if any(first_item.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']):
+                                try:
+                                    img = Image.open(first_item)
+                                    print("调试: 成功从文件路径加载图片")
+                                except Exception as e:
+                                    print(f"调试: 无法从路径加载图片: {e}")
+                            else:
+                                print("调试: 字符串不是图片文件路径")
+                        else:
+                            # 可能是图片对象
+                            img = first_item
+                else:
+                    # 直接是图片对象
+                    img = clipboard_content
+                    print("调试: 剪贴板直接包含图片对象")
+
+            # 检查PIL方法是否成功
+            if img and hasattr(img, 'save'):
+                print("调试: PIL方法成功获取图片")
                 buffer = io.BytesIO()
                 img.save(buffer, format='PNG')
                 image_data = buffer.getvalue()
-                
+
                 self.selected_images.append({
                     'data': image_data,
                     'source': '剪贴板',
                     'size': img.size,
                     'image': img
                 })
-                
+
                 self.update_image_preview()
-            else:
-                messagebox.showwarning("警告", "剪贴板中没有图片数据")
-                
+                return
+
+            # 方法2: 尝试使用win32clipboard直接获取位图数据
+            print("调试: PIL方法失败，尝试win32clipboard方法")
+            try:
+                import win32clipboard
+                import win32con
+
+                win32clipboard.OpenClipboard()
+
+                # 检查是否有位图格式
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+                    print("调试: 发现CF_DIB格式")
+                    dib_data = win32clipboard.GetClipboardData(win32con.CF_DIB)
+                    win32clipboard.CloseClipboard()
+
+                    # 将DIB数据转换为PIL图像
+                    try:
+                        # DIB数据包含BITMAPINFOHEADER + 像素数据
+                        # 我们需要跳过头部信息
+                        import struct
+
+                        # 读取BITMAPINFOHEADER
+                        header_size = struct.unpack('<I', dib_data[:4])[0]
+                        width = struct.unpack('<I', dib_data[4:8])[0]
+                        height = struct.unpack('<I', dib_data[8:12])[0]
+                        planes = struct.unpack('<H', dib_data[12:14])[0]
+                        bit_count = struct.unpack('<H', dib_data[14:16])[0]
+
+                        print(f"调试: DIB信息 - 宽度:{width}, 高度:{height}, 位深:{bit_count}")
+
+                        # 计算像素数据偏移
+                        pixel_offset = header_size
+                        if bit_count <= 8:
+                            # 有调色板
+                            colors_used = struct.unpack('<I', dib_data[32:36])[0]
+                            if colors_used == 0:
+                                colors_used = 1 << bit_count
+                            pixel_offset += colors_used * 4
+
+                        # 提取像素数据
+                        pixel_data = dib_data[pixel_offset:]
+
+                        # 创建PIL图像
+                        if bit_count == 24:
+                            # BGR格式，需要转换为RGB
+                            img = Image.frombytes('RGB', (width, abs(height)), pixel_data, 'raw', 'BGR', 0, -1 if height > 0 else 1)
+                        elif bit_count == 32:
+                            # BGRA格式
+                            img = Image.frombytes('RGBA', (width, abs(height)), pixel_data, 'raw', 'BGRA', 0, -1 if height > 0 else 1)
+                        else:
+                            print(f"调试: 不支持的位深度: {bit_count}")
+                            img = None
+
+                        if img:
+                            print("调试: 成功从DIB数据创建图片")
+
+                    except Exception as dib_error:
+                        print(f"调试: DIB数据处理失败: {dib_error}")
+                        img = None
+
+                elif win32clipboard.IsClipboardFormatAvailable(win32con.CF_BITMAP):
+                    print("调试: 发现CF_BITMAP格式")
+                    win32clipboard.CloseClipboard()
+                    messagebox.showwarning("提示", "检测到位图格式，但需要更复杂的处理")
+                    return
+
+                else:
+                    # 显示剪贴板中可用的格式
+                    formats = []
+                    format_id = 0
+                    while True:
+                        format_id = win32clipboard.EnumClipboardFormats(format_id)
+                        if format_id == 0:
+                            break
+                        try:
+                            format_name = win32clipboard.GetClipboardFormatName(format_id)
+                            formats.append(f"{format_id}: {format_name}")
+                        except:
+                            formats.append(f"{format_id}: (标准格式)")
+                    win32clipboard.CloseClipboard()
+
+                    print(f"调试: 剪贴板中的格式: {formats}")
+                    messagebox.showwarning("警告", f"剪贴板中没有支持的图片格式\n\n可用格式:\n" + "\n".join(formats[:5]))
+                    return
+
+            except ImportError:
+                print("调试: win32clipboard不可用")
+            except Exception as win32_error:
+                print(f"调试: win32clipboard方法出错: {win32_error}")
+                try:
+                    win32clipboard.CloseClipboard()
+                except:
+                    pass
+
+            # 如果win32方法成功了
+            if img and hasattr(img, 'save'):
+                print("调试: win32方法成功获取图片")
+                buffer = io.BytesIO()
+                img.save(buffer, format='PNG')
+                image_data = buffer.getvalue()
+
+                self.selected_images.append({
+                    'data': image_data,
+                    'source': '剪贴板',
+                    'size': img.size,
+                    'image': img
+                })
+
+                self.update_image_preview()
+                messagebox.showinfo("成功", "已从剪贴板添加图片")
+                return
+
+            # 所有方法都失败了
+            messagebox.showwarning("警告", "剪贴板中没有有效的图片数据\n\n请尝试:\n1. 重新截图或复制图片\n2. 使用'选择图片文件'功能\n3. 确保复制的是图片而不是文件路径")
+
         except Exception as e:
+            print(f"调试: 异常详情: {e}")
+            import traceback
+            traceback.print_exc()
             messagebox.showerror("错误", f"无法从剪贴板获取图片: {str(e)}")
             
     def clear_all_images(self):
@@ -523,14 +683,29 @@ def pick_image() -> MCPImage:
         def paste_clipboard():
             try:
                 from PIL import ImageGrab
-                img = ImageGrab.grabclipboard()
-                if img:
+                clipboard_content = ImageGrab.grabclipboard()
+
+                # 处理不同类型的剪贴板内容
+                img = None
+                if clipboard_content is not None:
+                    # 如果是列表，取第一个元素
+                    if isinstance(clipboard_content, list):
+                        if len(clipboard_content) > 0:
+                            img = clipboard_content[0]
+                        else:
+                            messagebox.showwarning("警告", "剪贴板中的图片列表为空")
+                            return
+                    else:
+                        # 直接是图片对象
+                        img = clipboard_content
+
+                if img and hasattr(img, 'save'):
                     buffer = io.BytesIO()
                     img.save(buffer, format='PNG')
                     selected_image['data'] = buffer.getvalue()
                     root.destroy()
                 else:
-                    messagebox.showwarning("警告", "剪贴板中没有图片")
+                    messagebox.showwarning("警告", "剪贴板中没有有效的图片数据")
             except Exception as e:
                 messagebox.showerror("错误", f"剪贴板操作失败: {e}")
                 
@@ -589,10 +764,15 @@ def get_image_info(image_path: str) -> str:
         return f"获取图片信息失败: {str(e)}"
 
 
-if __name__ == "__main__":
-    mcp.run()
-
-
 def main():
     """Main entry point for the mcp-feedback-collector command."""
-    mcp.run() 
+    try:
+        mcp.run()
+    except KeyboardInterrupt:
+        print("\n程序被用户中断")
+    except Exception as e:
+        print(f"程序运行出错: {e}")
+
+
+if __name__ == "__main__":
+    main()
